@@ -190,15 +190,21 @@
     (write-byte (ldb (byte 8 16) bits) stream)
     (write-byte (ldb (byte 8 24) bits) stream)))
 
-(multiple-value-bind (metadata samples) (load-wav-file "Samples/Flocks_A#0.wav")
-  (print metadata)
-  (when samples
-    (with-open-file (f "test.bin"
+(defun append-wav-file-f32s-to-stream (stream file-name)
+  "Appends a load of wav file f32s to the stream and returns the metadata"
+  (multiple-value-bind (metadata samples) (load-wav-file file-name)
+      (when samples
+        (for-array s samples
+          (write-f32-le stream s)))
+    metadata))
+
+(with-open-file (f "test.bin"
                        :if-exists :supersede
                        :direction :output
                        :element-type '(unsigned-byte 8))
-      (for-array s samples
-        (write-f32-le f s)))))
+  (append-wav-file-f32s-to-stream f "Samples/Flocks_A#0.wav")
+  (append-wav-file-f32s-to-stream f "Samples/Flocks_A#1.wav")
+  (append-wav-file-f32s-to-stream f "Samples/Flocks_A#2.wav"))
 
 ;; We can test these with:
 ;; ffmpeg -f f32le -ar 96000 -ac 2 -i test.bin -f pulse default
