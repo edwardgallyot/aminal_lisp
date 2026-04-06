@@ -19,14 +19,18 @@
           ((eql ,l nil))
        ,@body)))
 
+(defun make-empty-string ()
+  (make-array '(0)
+              :element-type 'base-char
+              :fill-pointer 0
+              :adjustable t))
+
 (defmacro for-array (var array &body body)
   (with-gensyms (x)
     `(do ((,x 0 (+ ,x 1)))
-       ((= ,x (length ,array)))
-     (let ((,var (aref ,array ,x)))
-       ,@body))))
-
-;; (for-array x #(1 2 3) (print x))
+         ((= ,x (length ,array)))
+       (let ((,var (aref ,array ,x)))
+         ,@body))))
 
 (defmacro array-put (array i v)
   `(setf (aref ,array ,i) ,v))
@@ -45,6 +49,9 @@
 
 (defmacro plist-put (plist key value)
   `(setf (getf ,plist ,key) ,value))
+
+(defmacro list-push (list value)
+  `(setf ,list (push ,value ,list)))
 
 ;;; byte converters
 (defmacro defbyteconverter (name num-bytes &body body)
@@ -125,8 +132,6 @@
 (defbytereader with-stereo-frame-s24
   #'stereo-frame-s24-from-bytes 6)
 
-
-
 (defparameter *WAVEFORMATEX* 65534)
 
 (defun load-wav-file (file-name &key (print-samples nil))
@@ -193,19 +198,126 @@
 (defun append-wav-file-f32s-to-stream (stream file-name)
   "Appends a load of wav file f32s to the stream and returns the metadata"
   (multiple-value-bind (metadata samples) (load-wav-file file-name)
-      (when samples
-        (for-array s samples
-          (write-f32-le stream s)))
+    (when samples
+      (for-array s samples
+        (write-f32-le stream s)))
     metadata))
 
+(defun c-tree (&rest rest)
+  (apply #'list 'c-syntax rest))
+
+(defun c-struct (id &rest fields)
+  (list 'c-struct :id id :fields fields))
+
+(defun c-enum (id &key members)
+  (list 'c-enum :id id :members members))
+
+(defun c-id (id &key (value nil))
+  (list 'c-id :id id :value value))
+
+(defun c-var (type id &key (value nil))
+  (list 'c-var :type type :id id :value value))
+
+(defun c-value (value)
+  (list 'c-var :value value))
+
+(defun c-array (id &key type size (values nil))
+  (list 'c-array :id id :type type :size size :values values))
+
+(defun c-fn (id &key (ret nil) (args nil) (body nil))
+  (list 'c-fn :id id :ret ret :args args :body body))
+
+(defmacro c-tree-append (tree code)
+  `(setf ,tree (append ,tree (list ,code))))
+
+(defmacro add-sample-to-gen-tree (path stream id members offsets sizes)
+  (with-gensyms (metadata)
+    `(let ((,metadata (append-wav-file-f32s-to-stream ,stream ,path)))
+       (list-push ,members ,id)
+       (list-push ,offsets (apply #'+ ,sizes))
+       (list-push ,sizes (getf ,metadata :size-bytes)))))
+
+(defun sample-spec (path id)
+  (list :path path :id id))
+
+(defmacro add-samples-to-gen-tree (specifiers stream members offsets sizes)
+  (with-gensyms (var path id)
+    `(for-list ,var ,specifiers
+       (let ((,path (getf ,var :path))
+             (,id (getf ,var :id)))
+         (add-sample-to-gen-tree ,path ,stream ,id ,members ,offsets ,sizes)))))
+
+(defun emit-c-enum (enum output-string)
+  (let ((body (cdr enum)))
+    (format output-string "enum ~a {~%" (getf body :id))
+    (let ((members (getf body :members))
+          (i 0))
+      (for-list y members
+          (let ((m (getf (cdr y) :id)))
+            (format output-string "    ~a" (eval m))
+            (when (< i (- (length members) 1))
+              (format output-string ","))
+            (format output-string "~%"))
+        (incf i)))
+    (format output-string "};~%")))
+
+(defun c-emit-type (type)
+  (cond
+    ((eql type 'u64) "unsigned long long")
+    (t "TODO!")))
+
+(defun emit-c-array (array output-string)
+  (let ((body (cdr array)))
+    (format output-string "~a ~a[~a] = {~%"
+            (c-emit-type (getf body :type))
+            (getf body :id)
+            (getf body :size))
+    (let ((values (getf body :values))
+          (i 0))
+      (for-list x values
+          (let ((v (getf (cdr x) :value)))
+            (format output-string "    ~a" v)
+            (when (< i (- (length values) 1))
+              (format output-string ","))
+            (format output-string "~%"))
+        (incf i)))
+    (format output-string "};~%")))
+
 (with-open-file (f "test.bin"
-                       :if-exists :supersede
-                       :direction :output
-                       :element-type '(unsigned-byte 8))
-  (append-wav-file-f32s-to-stream f "Samples/Flocks_A#0.wav")
-  (append-wav-file-f32s-to-stream f "Samples/Flocks_A#1.wav")
-  (append-wav-file-f32s-to-stream f "Samples/Flocks_A#2.wav"))
+                   :if-exists :supersede
+                   :direction :output
+                   :element-type '(unsigned-byte 8))
+  (let ((tree (c-tree))
+        (members nil)
+        (offsets nil)
+        (sizes nil)
+        (spec '((:path "Samples/Flocks_A#0.wav" :id 'Flocks_ASharp0)
+                (:path "Samples/Flocks_A#1.wav" :id 'Flocks_ASharp1)
+                (:path "Samples/Flocks_A0.wav" :id 'Flocks_A0)
+                (:path "Samples/Flocks_A#2.wav" :id 'Flocks_ASharp2))))
+    (add-samples-to-gen-tree spec f members offsets sizes)
+    (c-tree-append tree (c-enum 'Sample_Map_Key :members (mapcar #'(lambda (m) (c-id m)) members)))
+    (c-tree-append tree (c-array 'Sample_Map_Sizes
+                                 :type 'u64
+                                 :size (length sizes)
+                                 :values (mapcar #'(lambda (m) (c-value m)) sizes)))
+    (c-tree-append tree (c-array 'Sample_Map_Offsets
+                                 :type 'u64 
+                                 :size (length offsets)
+                                 :values (mapcar #'(lambda (m) (c-value m)) offsets)))
+    (let ((output (make-empty-string)))
+      (with-output-to-string (s output)
+        (format s "#pragma once~%")
+        (for-list x tree
+          (cond
+            ((eql x 'c-syntax) nil)
+            ((eql (car x) 'c-enum) (emit-c-enum x s))
+            ((eql (car x) 'c-array) (emit-c-array x s)))
+          (format s "~%"))
+        (formatln "~a" output))
+      (with-open-file (f "flocks_map.h" :direction :output :if-exists :supersede)
+        (write-string output f)))
+    tree))
 
 ;; We can test these with:
 ;; ffmpeg -f f32le -ar 96000 -ac 2 -i test.bin -f pulse default
-
