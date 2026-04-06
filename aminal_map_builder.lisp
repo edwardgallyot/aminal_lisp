@@ -171,20 +171,23 @@
         (with-read-u32 (f data-size))
         (let* ((num-samples (getf metadata :num-samples))
                (samples (make-array (* num-samples 2)
-                                    :element-type 'single-float))
-               (left-i 0)
-               (right-i 1))
-          (dotimes (x num-samples)
-            (with-stereo-frame-s24 (f frame)
-              (let ((l (s24-to-float (getf frame :L)))
-                    (r (s24-to-float (getf frame :R))))
-                (when print-samples
-                  (formatln "L: ~f R: ~f" l r))
-                (array-put samples left-i l)
-                (array-put samples right-i r)))
-            (incf left-i 2)
-            (incf right-i 2))
-          (formatln "Metadata: ~a" metadata)
+                                    :element-type 'single-float)))
+          (let ((i 0))
+            (dotimes (x num-samples)
+              (with-stereo-frame-s24 (f frame)
+                (let ((l (s24-to-float (getf frame :L))))
+                  (when print-samples
+                    (formatln "L: ~f" l))
+                  (array-put samples i l)))
+              (incf i 2)))
+          (let ((i 1))
+            (dotimes (x num-samples)
+              (with-stereo-frame-s24 (f frame)
+                (let ((r (s24-to-float (getf frame :R))))
+                  (when print-samples
+                    (formatln "R: ~f" r))
+                  (array-put samples i r)))
+              (incf i 2)))
           (values metadata samples))))))
 
 (defun write-f32-le (stream value)
@@ -283,7 +286,14 @@
         (incf i)))
     (format output-string "};~%")))
 
-(with-open-file (f "test.bin"
+(defun build-sample-id (path)
+  (substitute #\S #\# (pathname-name path)))
+
+(defun build-samples-spec ()
+  (mapcar #'(lambda (x) (list :path x :id (build-sample-id x)))
+          (directory "Samples/*.wav")))
+
+(with-open-file (f "flocks_map.bin"
                    :if-exists :supersede
                    :direction :output
                    :element-type '(unsigned-byte 8))
@@ -291,16 +301,17 @@
         (members nil)
         (offsets nil)
         (sizes nil)
-        (spec '((:path "Samples/Flocks_A#0.wav" :id 'Flocks_ASharp0)
-                (:path "Samples/Flocks_A#1.wav" :id 'Flocks_ASharp1)
-                (:path "Samples/Flocks_A0.wav" :id 'Flocks_A0)
-                (:path "Samples/Flocks_A#2.wav" :id 'Flocks_ASharp2))))
+        (spec (build-samples-spec)))
     (add-samples-to-gen-tree spec f members offsets sizes)
     (c-tree-append tree (c-enum 'Sample_Map_Key :members (mapcar #'(lambda (m) (c-id m)) members)))
-    (c-tree-append tree (c-array 'Sample_Map_Sizes
+    (c-tree-append tree (c-array 'Sample_Map_Total_Sizes
                                  :type 'u64
                                  :size (length sizes)
                                  :values (mapcar #'(lambda (m) (c-value m)) sizes)))
+    (c-tree-append tree (c-array 'Sample_Map_Channel_Sizes
+                                 :type 'u64
+                                 :size (length sizes)
+                                 :values (mapcar #'(lambda (m) (c-value (/ m 2))) sizes)))
     (c-tree-append tree (c-array 'Sample_Map_Offsets
                                  :type 'u64 
                                  :size (length offsets)
