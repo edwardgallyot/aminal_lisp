@@ -171,23 +171,25 @@
         (with-read-u32 (f data-size))
         (let* ((num-samples (getf metadata :num-samples))
                (samples (make-array (* num-samples 2)
-                                    :element-type 'single-float)))
-          (let ((i 0))
-            (dotimes (x num-samples)
-              (with-stereo-frame-s24 (f frame)
-                (let ((l (s24-to-float (getf frame :L))))
-                  (when print-samples
-                    (formatln "L: ~f" l))
-                  (array-put samples i l)))
-              (incf i 2)))
-          (let ((i 1))
-            (dotimes (x num-samples)
-              (with-stereo-frame-s24 (f frame)
-                (let ((r (s24-to-float (getf frame :R))))
-                  (when print-samples
-                    (formatln "R: ~f" r))
-                  (array-put samples i r)))
-              (incf i 2)))
+                                    :element-type 'single-float))
+               (read-position (file-position f))
+               (i 0))
+          (file-position f read-position)
+          (dotimes (x num-samples)
+            (with-stereo-frame-s24 (f frame)
+              (let ((l (s24-to-float (getf frame :L))))
+                (when print-samples
+                  (formatln "L: ~f" l))
+                (array-put samples i l)))
+            (incf i))
+          (file-position f read-position)
+          (dotimes (x num-samples)
+            (with-stereo-frame-s24 (f frame)
+              (let ((r (s24-to-float (getf frame :R))))
+                (when print-samples
+                  (formatln "R: ~f" r))
+                (array-put samples i r)))
+            (incf i))
           (values metadata samples))))))
 
 (defun write-f32-le (stream value)
@@ -209,9 +211,6 @@
 (defun c-tree (&rest rest)
   (apply #'list 'c-syntax rest))
 
-(defun c-struct (id &rest fields)
-  (list 'c-struct :id id :fields fields))
-
 (defun c-enum (id &key members)
   (list 'c-enum :id id :members members))
 
@@ -224,8 +223,11 @@
 (defun c-value (value)
   (list 'c-var :value value))
 
-(defun c-array (id &key type size (values nil))
-  (list 'c-array :id id :type type :size size :values values))
+(defun c-array (id &key (mods nil) type size (values nil))
+  (list 'c-array :id id :mods mods :type type :size size :values values))
+
+(defun c-record (id &key (members nil))
+  (list 'c-record :id id :members members))
 
 (defun c-fn (id &key (ret nil) (args nil) (body nil))
   (list 'c-fn :id id :ret ret :args args :body body))
@@ -267,23 +269,61 @@
 (defun c-emit-type (type)
   (cond
     ((eql type 'u64) "unsigned long long")
+    ((eql type 's64) "long long")
+    ((eql type 'u8) "unsigned char")
+    ((eql type 's8) "char")
+    ((eql type 'string) "const char*")
     (t "TODO!")))
 
+(defun c-emit-mods (mods)
+  (let ((result nil))
+  (dolist (m mods result)
+    (cond 
+      ((eql m 'static) (push "static" result))
+      ((eql m 'const) (push "const" result))))))
+
 (defun emit-c-array (array output-string)
-  (let ((body (cdr array)))
-    (format output-string "~a ~a[~a] = {~%"
+  (let* ((body (cdr array))
+         (mods (getf body :mods)))
+    (when mods
+      (dolist (m (c-emit-mods mods))
+        (format output-string "~a " m)))
+    (format output-string "~a ~a[~a]"
             (c-emit-type (getf body :type))
             (getf body :id)
             (getf body :size))
     (let ((values (getf body :values))
           (i 0))
-      (for-list x values
+      (when values
+        (format output-string "= {~%")
+        (for-list x values
           (let ((v (getf (cdr x) :value)))
             (format output-string "    ~a" v)
             (when (< i (- (length values) 1))
               (format output-string ","))
             (format output-string "~%"))
-        (incf i)))
+          (incf i))
+        (format output-string "}")))
+    (format output-string ";~%")))
+
+(defun emit-c-var (var output-string)
+  (let* ((body (cdr var))
+         (value (getf body :value)))
+    (format output-string "~a ~a"
+            (c-emit-type (getf body :type))
+            (getf body :id))
+    (when value
+      (format output-string "= ~a" value))
+    (format output-string ";~%")))
+
+(defun emit-c-record (var output-string)
+  (let* ((body (cdr var))
+         (members (getf body :members)))
+    (format output-string "struct ~a {~%" (getf body :id))
+    (dolist (m members)
+      (case (car m)
+        (c-var (emit-c-var m output-string))
+        (c-array (emit-c-array m output-string))))
     (format output-string "};~%")))
 
 (defun build-sample-id (path)
@@ -293,42 +333,100 @@
   (mapcar #'(lambda (x) (list :path x :id (build-sample-id x)))
           (directory "Samples/*.wav")))
 
-(with-open-file (f "flocks_map.bin"
-                   :if-exists :supersede
-                   :direction :output
-                   :element-type '(unsigned-byte 8))
-  (let ((tree (c-tree))
-        (members nil)
-        (offsets nil)
-        (sizes nil)
-        (spec (build-samples-spec)))
-    (add-samples-to-gen-tree spec f members offsets sizes)
-    (c-tree-append tree (c-enum 'Sample_Map_Key :members (mapcar #'(lambda (m) (c-id m)) members)))
-    (c-tree-append tree (c-array 'Sample_Map_Total_Sizes
-                                 :type 'u64
-                                 :size (length sizes)
-                                 :values (mapcar #'(lambda (m) (c-value m)) sizes)))
-    (c-tree-append tree (c-array 'Sample_Map_Channel_Sizes
-                                 :type 'u64
-                                 :size (length sizes)
-                                 :values (mapcar #'(lambda (m) (c-value (/ m 2))) sizes)))
-    (c-tree-append tree (c-array 'Sample_Map_Offsets
-                                 :type 'u64 
-                                 :size (length offsets)
-                                 :values (mapcar #'(lambda (m) (c-value m)) offsets)))
-    (let ((output (make-empty-string)))
-      (with-output-to-string (s output)
-        (format s "#pragma once~%")
-        (for-list x tree
-          (cond
-            ((eql x 'c-syntax) nil)
-            ((eql (car x) 'c-enum) (emit-c-enum x s))
-            ((eql (car x) 'c-array) (emit-c-array x s)))
-          (format s "~%"))
-        (formatln "~a" output))
-      (with-open-file (f "flocks_map.h" :direction :output :if-exists :supersede)
-        (write-string output f)))
-    tree))
+(defparameter *token->note-number* '(C  0
+                                     CS 1
+                                     D  2
+                                     DS 3
+                                     E  4
+                                     F  5
+                                     FS 6
+                                     G  7
+                                     GS 8
+                                     A  9
+                                     AS 10
+                                     B  11))
 
-;; We can test these with:
-;; ffmpeg -f f32le -ar 96000 -ac 2 -i test.bin -f pulse default
+(defparameter *note-number-base* 48)
+
+(defun build-flocks-map ()
+  (with-open-file (f "flocks_map.bin"
+                     :if-exists :supersede
+                     :direction :output
+                     :element-type '(unsigned-byte 8))
+    (let ((tree (c-tree))
+          (members nil)
+          (offsets nil)
+          (sizes nil)
+          (spec (build-samples-spec))
+          (midi-map (make-array 128 :initial-element -1 :element-type '(signed-byte 8))))
+      (add-samples-to-gen-tree spec f members offsets sizes)
+
+      (let* ((i 0)
+             (notes (mapcar
+                     #'(lambda (m)
+                         (let* ((name (subseq m (length "Flocks_")))
+                                (token (read-from-string (remove-if #'digit-char-p name)))
+                                (octave (+ *note-number-base*
+                                           (* (parse-integer (remove-if
+                                                              #'alpha-char-p
+                                                              name))
+                                              12)))
+                                (note-number (+ octave (getf *token->note-number* token))))
+                           (list note-number (incf i))))
+                     members)))
+        (print notes)
+        (dolist (n notes)
+          (array-put midi-map (car n) (cadr n))))
+
+      (c-tree-append tree (c-enum 'Sample_Map_Key :members (mapcar #'(lambda (m) (c-id m)) members)))
+      (c-tree-append tree (c-array 'Sample_Map_Total_Sizes
+                                   :type 'u64
+                                   :size (length sizes)
+                                   :mods '(const static)
+                                   :values (mapcar #'(lambda (m) (c-value m)) sizes)))
+      (c-tree-append tree (c-array 'Sample_Map_Channel_Sizes
+                                   :type 'u64
+                                   :mods '(const static)
+                                   :size (length sizes)
+                                   :values (mapcar #'(lambda (m) (c-value (/ m 2))) sizes)))
+      (c-tree-append tree (c-array 'Sample_Map_Offsets
+                                   :type 'u64 
+                                   :mods '(const static)
+                                   :size (length offsets)
+                                   :values (mapcar #'(lambda (m) (c-value m)) offsets)))
+      (c-tree-append tree (c-array 'Sample_Names
+                                   :type 'string 
+                                   :mods '(static)
+                                   :size (length members)
+                                   :values (mapcar #'(lambda (m) (c-value (format nil "\"~a\"" m))) members)))
+      (c-tree-append tree (c-array 'Midi_Map
+                                   :type 's8
+                                   :mods '(const static)
+                                   :size (length midi-map)
+                                   :values (map 'list #'(lambda (m) (c-value m)) midi-map)))
+      (c-tree-append tree (c-record 'Flocks_Sample_Counts
+                                    :members (list (c-array 'counts
+                                                           :type 'u64
+                                                           :size (length sizes)))))
+      (c-tree-append tree (c-record 'Flocks_Sample_Voices
+                                    :members (list (c-array 'voices
+                                                           :type 's64
+                                                           :size (length sizes)))))
+      (c-tree-append tree (c-var 'u64 'Num_Flocks_Samples :value (length sizes)))
+      (let ((output (make-empty-string)))
+        (with-output-to-string (s output)
+          (format s "#pragma once~%")
+          (for-list x tree
+            (cond
+              ((eql x 'c-syntax) nil)
+              ((eql (car x) 'c-enum) (emit-c-enum x s))
+              ((eql (car x) 'c-var) (emit-c-var x s))
+              ((eql (car x) 'c-record) (emit-c-record x s))
+              ((eql (car x) 'c-array) (emit-c-array x s)))
+            (format s "~%")))
+        (with-open-file (f "flocks_map.h" :direction :output :if-exists :supersede)
+          (write-string output f)))
+      tree)))
+
+;; We can test these with, this will do one channel at a time:
+;; ffmpeg -f f32le -ar 96000 -ac 1 -i test.bin -f pulse default
