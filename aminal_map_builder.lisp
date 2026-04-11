@@ -361,7 +361,7 @@
           (midi-map (make-array 128 :initial-element -1 :element-type '(signed-byte 8))))
       (add-samples-to-gen-tree spec f members offsets sizes)
 
-      (let* ((i 0)
+      (let* ((i -1)
              (notes (mapcar
                      #'(lambda (m)
                          (let* ((name (subseq m (length "Flocks_")))
