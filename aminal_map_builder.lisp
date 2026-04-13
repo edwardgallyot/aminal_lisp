@@ -240,7 +240,7 @@
     `(let ((,metadata (append-wav-file-f32s-to-stream ,stream ,path)))
        (list-push ,members ,id)
        (list-push ,offsets (apply #'+ ,sizes))
-       (list-push ,sizes (getf ,metadata :size-bytes)))))
+       (list-push ,sizes (* 8 (getf ,metadata :num-samples))))))
 
 (defun sample-spec (path id)
   (list :path path :id id))
@@ -427,6 +427,14 @@
         (with-open-file (f "flocks_map.h" :direction :output :if-exists :supersede)
           (write-string output f)))
       tree)))
+
+(defun test-broken-file (path)
+  (with-open-file (f path :element-type '(unsigned-byte 8))
+    (dotimes (i (/ (file-length f)
+                   4))
+      (let ((array (make-array 4 :element-type 'unsigned-byte)))
+        (read-sequence array f)
+        (formatln "~a" array)))))
 
 ;; We can test these with, this will do one channel at a time:
 ;; ffmpeg -f f32le -ar 96000 -ac 1 -i test.bin -f pulse default
