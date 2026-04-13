@@ -270,6 +270,7 @@
   (cond
     ((eql type 'u64) "unsigned long long")
     ((eql type 's64) "long long")
+    ((eql type 'f32) "float")
     ((eql type 'u8) "unsigned char")
     ((eql type 's8) "char")
     ((eql type 'string) "const char*")
@@ -284,14 +285,19 @@
 
 (defun emit-c-array (array output-string)
   (let* ((body (cdr array))
-         (mods (getf body :mods)))
+         (mods (getf body :mods))
+         (sizes (getf body :size))
+         (print-array-size (lambda (s o) (format o "[~a]" s))))
     (when mods
       (dolist (m (c-emit-mods mods))
         (format output-string "~a " m)))
-    (format output-string "~a ~a[~a]"
+    (format output-string "~a ~a"
             (c-emit-type (getf body :type))
-            (getf body :id)
-            (getf body :size))
+            (getf body :id))
+    (cond 
+      ((listp sizes) (dolist (s sizes)
+                       (funcall print-array-size s output-string)))
+      ((numberp sizes) (funcall print-array-size sizes output-string)))
     (let ((values (getf body :values))
           (i 0))
       (when values
@@ -331,7 +337,7 @@
 
 (defun build-samples-spec ()
   (mapcar #'(lambda (x) (list :path x :id (build-sample-id x)))
-          (directory "Samples/*.wav")))
+          (directory "rename manual/*.wav")))
 
 (defparameter *token->note-number* '(C  0
                                      CS 1
@@ -346,7 +352,9 @@
                                      AS 10
                                      B  11))
 
-(defparameter *note-number-base* 48)
+(defparameter *note-number-base* 36)
+
+(defparameter *pre-fetch-samples* (* 64 1024))
 
 (defun build-flocks-map ()
   (with-open-file (f "flocks_map.bin"
@@ -364,6 +372,7 @@
       (let* ((i -1)
              (notes (mapcar
                      #'(lambda (m)
+                         (incf i)
                          (let* ((name (subseq m (length "Flocks_")))
                                 (token (read-from-string (remove-if #'digit-char-p name)))
                                 (octave (+ *note-number-base*
@@ -372,7 +381,7 @@
                                                               name))
                                               12)))
                                 (note-number (+ octave (getf *token->note-number* token))))
-                           (list note-number (incf i))))
+                           (list note-number i)))
                      members)))
         (print notes)
         (dolist (n notes)
@@ -413,6 +422,11 @@
                                                            :type 's64
                                                            :size (length sizes)))))
       (c-tree-append tree (c-var 'u64 'Num_Flocks_Samples :value (length sizes)))
+      (c-tree-append tree (c-record 'Flocks_Pre_Fetchers
+                                    :members (list (c-array 'pre_fetchers
+                                                           :type 'f32
+                                                           :size (list (length sizes) (* 2 *pre-fetch-samples*))))))
+      (c-tree-append tree (c-var 'u64 'Num_Pre_Fetch_Samples :value *pre-fetch-samples*))
       (let ((output (make-empty-string)))
         (with-output-to-string (s output)
           (format s "#pragma once~%")
